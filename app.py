@@ -1,44 +1,35 @@
 import streamlit as st
 import requests
 import datetime
-import pandas as pd
+import time
+import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# ===== Google Sheet Setup =====
+# ====== GOOGLE SHEET SETUP ======
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1ZBVcS3dEwbXt_rA1yCJdGMiYWEqNdl12C3mbzXyUG28'  # ✅ Your Sheet ID
-SHEET_NAME = 'Sheet1'
+SPREADSHEET_ID = "1ZBVc2S0xO1QvZahGJ7ZIn8GpQqkNnJ2I2Mck8zVnHAY"  # ✅ আপনার Sheet ID এখানেই বসানো
+SHEET_NAME = "Sheet1"
 
-# ===== Google Auth from Streamlit Secrets =====
+# Authenticate with secrets.toml
 credentials = service_account.Credentials.from_service_account_info(
-    st.secrets["gcp_service_account"], scopes=SCOPES
+    st.secrets["gcp_service_account"],
+    scopes=SCOPES
 )
 sheet_service = build('sheets', 'v4', credentials=credentials)
 sheet = sheet_service.spreadsheets()
 
-# ===== Peer Storage =====
+# ====== GLOBAL STATE ======
 if "user_peers" not in st.session_state:
     st.session_state.user_peers = {}
+
 if "peer_data" not in st.session_state:
     st.session_state.peer_data = {}
-if "peer_last_win" not in st.session_state:
-    st.session_state.peer_last_win = {}
 
-# ===== Functions =====
-def fetch_peer_info(pid):
-    try:
-        url = f"https://dashboard.gensyn.ai/api/v1/peer?id={pid}"
-        r = requests.get(url, timeout=8)
-        if r.status_code == 200:
-            d = r.json()
-            return {
-                "peerName": d.get("peerName", "N/A"),
-                "wins": d.get("score", 0),
-                "reward": d.get("reward", 0)
-            }
-    except:
-        return None
+if "last_win_time" not in st.session_state:
+    st.session_state.last_win_time = {}
+
+# ====== FUNCTIONS ======
 
 def append_to_sheet(values):
     try:
@@ -51,79 +42,97 @@ def append_to_sheet(values):
             body=body
         ).execute()
     except Exception as e:
-        st.error(f"Sheet Write Error: {e}")
+        st.error(f"❌ Google Sheet Error: {e}")
 
-# ===== UI =====
-st.title("📊 Gensyn Peer Tracker (Web)")
-st.markdown("Track your Peer wins, rewards and live status synced to Google Sheets.")
+def fetch_peer_info(pid):
+    try:
+        url = f"https://dashboard.gensyn.ai/api/v1/peer?id={pid}"
+        r = requests.get(url, timeout=8)
+        if r.status_code == 200:
+            d = r.json()
+            return {
+                "peerName": d.get("peerName", "N/A"),
+                "wins": d.get("score", 0),
+                "reward": d.get("reward", 0)
+            }
+    except:
+        pass
+    return None
 
-# User select or input
-username = st.text_input("Enter your username", key="username")
-if username and username not in st.session_state.user_peers:
-    st.session_state.user_peers[username] = []
+def monitor_peers(user):
+    st.toast("🔄 Monitoring started...", icon="🔍")
+    stop_time = time.time() + 60 * 5  # Run for 5 minutes max or until stopped manually
+    while time.time() < stop_time:
+        for pid in st.session_state.user_peers.get(user, []):
+            info = fetch_peer_info(pid)
+            if info:
+                old_wins = st.session_state.peer_data.get(pid, {}).get("wins", 0)
+                new_wins = info.get("wins", 0)
 
-# Peer Add
-if username:
-    peer_input = st.text_input("Add Peer IDs (space separated)")
-    if st.button("Add Peer IDs"):
-        new_peers = peer_input.strip().split()
-        for pid in new_peers:
-            if pid not in st.session_state.user_peers[username]:
-                st.session_state.user_peers[username].append(pid)
-        st.success(f"Added {len(new_peers)} peers to {username}")
+                if new_wins > old_wins:
+                    timestamp = datetime.datetime.now().isoformat()
+                    append_to_sheet([
+                        user, pid, info['peerName'], old_wins, new_wins,
+                        info['reward'], timestamp
+                    ])
+                    st.success(f"🎉 Win Detected! {pid[-6:]} - {new_wins} wins")
+                st.session_state.peer_data[pid] = info
+                st.session_state.last_win_time[pid] = datetime.datetime.now()
+        time.sleep(30)
 
-# Display Table
-if username and st.session_state.user_peers.get(username):
-    st.subheader("Your Peer Status")
-    data_rows = []
-    for pid in st.session_state.user_peers[username]:
-        info = fetch_peer_info(pid)
-        if info:
-            old = st.session_state.peer_data.get(pid, {}).get("wins", 0)
-            new = info.get("wins", 0)
-            # If win increased
-            if new > old:
-                append_to_sheet([
-                    username, pid, info['peerName'],
-                    old, new, info['reward'],
-                    datetime.datetime.now().isoformat()
-                ])
-            st.session_state.peer_data[pid] = info
-            st.session_state.peer_last_win[pid] = datetime.datetime.now()
-            data_rows.append({
-                "Peer ID": pid,
-                "Name": info['peerName'],
-                "Wins": info['wins'],
-                "Reward": info['reward']
-            })
-    if data_rows:
-        df = pd.DataFrame(data_rows)
-        st.dataframe(df, use_container_width=True)
+# ====== UI ======
+
+st.title("📊 Gensyn Peer Tracker (Streamlit)")
+
+# User Input
+user = st.text_input("Enter your User Name")
+if user and user not in st.session_state.user_peers:
+    st.session_state.user_peers[user] = []
+
+peer_input = st.text_area("Add Peer IDs (space-separated)")
+if st.button("➕ Add Peer IDs"):
+    if user:
+        new_ids = peer_input.strip().split()
+        st.session_state.user_peers[user].extend(pid for pid in new_ids if pid not in st.session_state.user_peers[user])
+        st.success(f"{len(new_ids)} peer IDs added.")
     else:
-        st.warning("No peer data available.")
+        st.warning("Please enter user name first.")
 
-# 1HR Filter
-if st.button("✅ 1HR Win Status"):
-    st.subheader("Last 1HR Winners")
+# Display Peers
+if user:
+    st.subheader(f"🔍 Peers for {user}")
+    peer_list = st.session_state.user_peers.get(user, [])
+    for pid in peer_list:
+        data = st.session_state.peer_data.get(pid, {})
+        st.write(f"• {pid} | Name: {data.get('peerName','-')} | Wins: {data.get('wins','-')} | Reward: {data.get('reward','-')}")
+
+# Start Monitoring
+if st.button("▶️ Start Monitoring"):
+    if user and st.session_state.user_peers.get(user):
+        monitor_peers(user)
+    else:
+        st.error("Please add at least one peer ID.")
+
+# Check status last 1hr
+if st.button("🕐 View 1 Hour Status"):
     cutoff = datetime.datetime.now() - datetime.timedelta(hours=1)
-    found = False
-    for pid, info in st.session_state.peer_data.items():
-        last = st.session_state.peer_last_win.get(pid)
-        if last and last > cutoff:
-            st.write(f"{pid[-6:]} - {info['wins']} wins")
-            found = True
-    if not found:
-        st.info("No peer has won in last 1 hour.")
+    result = ""
+    for u, plist in st.session_state.user_peers.items():
+        for pid in plist:
+            info = st.session_state.peer_data.get(pid)
+            last = st.session_state.last_win_time.get(pid)
+            if info and last and last > cutoff:
+                result += f"{u} - {pid[-6:]} - {info['wins']} wins\n"
+    st.text_area("1 Hour Active Peers", result or "No peers with wins in last 1 hour.")
 
-# 2HR Inactive
-if st.button("🛑 2HR Stop List"):
-    st.subheader("No Wins in Last 2 Hours")
+# Check Stopped Peers
+if st.button("⛔ View 2 Hour Stop List"):
     cutoff = datetime.datetime.now() - datetime.timedelta(hours=2)
-    found = False
-    for pid, info in st.session_state.peer_data.items():
-        last = st.session_state.peer_last_win.get(pid)
-        if not last or last < cutoff:
-            st.write(f"{pid[-6:]} - {info['wins']} wins")
-            found = True
-    if not found:
-        st.info("No peers are inactive.")
+    stopped = ""
+    for u, plist in st.session_state.user_peers.items():
+        for pid in plist:
+            last = st.session_state.last_win_time.get(pid)
+            info = st.session_state.peer_data.get(pid)
+            if info and (not last or last < cutoff):
+                stopped += f"{u} - {pid[-6:]} - {info['wins']} wins\n"
+    st.text_area("Stopped Peers (2hr+)", stopped or "No stopped peers.")
