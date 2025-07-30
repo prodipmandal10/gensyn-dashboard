@@ -1,31 +1,96 @@
 import streamlit as st
-import requests
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
+import requests
+import datetime
 
-# Google Sheet setup
-JSON_KEY_FILE = 'sonic-base-458507-a2-3c235152e55a.json'
-SHEET_ID = '1ZBVcGNRqsH3gPy1ZS8P3CN04Hr9iFsrTm0p2dLPXk-g'
-SHEET_NAME = 'Sheet1'
+st.set_page_config(page_title="Gensyn Peer Tracker", layout="wide")
 
+st.title("🚀 Gensyn Peer Tracker Web Dashboard")
+
+# ================= Google Sheets Setup =================
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_KEY_FILE, scope)
+
+# Streamlit Secrets থেকে Credentials নিয়ে আসা
+credentials_info = st.secrets["gcp_service_account"]
+creds = Credentials.from_service_account_info(credentials_info, scopes=scope)
+
 client = gspread.authorize(creds)
-sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
-# Streamlit UI
-st.title("🧠 Gensyn Peer Tracker Web Dashboard")
+SHEET_ID = '1ZBVcGNRqsH3gPy1ZS8P3CN04Hr9iFsrTm0p2dLPXk-g'
+sheet = client.open_by_key(SHEET_ID).worksheet('Sheet1')
 
-peer_id = st.text_input("Enter Peer ID")
-if st.button("Check Peer Status"):
+# ================= UI =================
+
+# ইউজার তালিকা লোড করা
+def load_users():
+    users = []
+    try:
+        all_records = sheet.get_all_records()
+        for row in all_records:
+            username = row.get("Username")
+            if username:
+                users.append(username)
+    except Exception as e:
+        st.error(f"Google Sheets error: {e}")
+    return users
+
+users = load_users()
+
+selected_user = st.selectbox("Select User", options=users)
+
+peer_ids = []
+if selected_user:
+    try:
+        all_records = sheet.get_all_records()
+        for row in all_records:
+            if row.get("Username") == selected_user:
+                # Peers start from 4th column onwards
+                for key, val in row.items():
+                    if key not in ["Username", "Status", "Last Update"]:
+                        if val and val.strip():
+                            peer_ids.append(val.strip())
+    except Exception as e:
+        st.error(f"Error loading peers: {e}")
+
+st.write(f"### Peer IDs for User: {selected_user}")
+st.write(peer_ids if peer_ids else "No Peer IDs found.")
+
+# ================= Peer Info Fetch =================
+
+def fetch_peer_info(peer_id):
     url = f"https://dashboard.gensyn.ai/api/v1/peer?id={peer_id}"
     try:
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            st.success(f"Peer Name: {data.get('peerName')}")
-            st.info(f"Wins: {data.get('score')} | Reward: {data.get('reward')}")
+            return {
+                "peerName": data.get("peerName", "N/A"),
+                "wins": data.get("score", 0),
+                "reward": data.get("reward", 0),
+                "peerId": peer_id
+            }
         else:
-            st.error("Failed to fetch peer info.")
+            return None
     except Exception as e:
-        st.error(f"Error: {e}")
+        return None
+
+if st.button("Refresh Peer Data"):
+    st.write("Fetching peer data...")
+    data_rows = []
+    for pid in peer_ids:
+        info = fetch_peer_info(pid)
+        if info:
+            data_rows.append(info)
+    if data_rows:
+        st.write("### Peer Data")
+        st.table(data_rows)
+    else:
+        st.warning("No data fetched.")
+
+# ================= Status Bar =================
+
+st.sidebar.header("App Status")
+st.sidebar.write("Select a user to see their peers.")
+st.sidebar.write(f"Total Users: {len(users)}")
+
